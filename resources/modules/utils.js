@@ -7,6 +7,8 @@ import { readDDiCString } from './importers/ddi-c-xml-importer.js'
 import { checksum } from '../helpers/checksum.ts'
 
 const webR = new WebR();
+var webRLoaded = false;
+var rObjectExists = false;
 
 export class Parser{
   static async parseFile(file, doneCallback){
@@ -52,11 +54,12 @@ export class Parser{
     await webR.FS.mount("WORKERFS", options, rLibraryPath);
     await webR.evalRVoid(`.libPaths(c(.libPaths(), "${rLibraryPath}"))`);
     await webR.evalR('library("DDIwR")');
+    webRLoaded = true;
     console.info('R packages installed');
   }
 
   static async parseDDIwR(file, dataset, done){
-    if (!webR.initialized) {
+    if (!webRLoaded) {
       await Parser.installRPackages();
     }
     
@@ -67,8 +70,8 @@ export class Parser{
       const contents = e.target.result;
       // write to the webR filesystem
       await webR.FS.writeFile('/home/web_user/' + file.name, new Uint8Array(contents));
-      console.debug('File uploaded and written to /home/web_user/'+file.name);
-      console.info('run convert with DDIwR...');
+      console.debug('parseDDIwR: File uploaded and written to /home/web_user/'+file.name);
+      console.info('parseDDIwR: Run convert with DDIwR...');
 
       // run the DDIwR conversion to extract DDI-C 2.6 metadata
       await webR.evalR(`DDIwR::convert("`+file.name+`", to="DDI", embed=FALSE)`);
@@ -85,6 +88,12 @@ export class Parser{
       var csvString = new TextDecoder().decode(readCsvResult);
 
       console.debug('CSV read');
+
+      var loadRObjectResult = await webR.evalR(`robject <- read.csv('/home/web_user/`+basename+`.csv')`);
+      var dataFrameRender = await webR.evalR(`print(head(robject, n = 3L))`);
+
+      console.debug('parseDDIwR: Dataframe loaded. head(robject, n = 3L) contains -^');
+      console.debug(await dataFrameRender.toJs());
 
       // TODO: this should not be done here
       var vars = readDDiCString(ddiString);
@@ -103,12 +112,31 @@ export class Parser{
   }
 
   static async parseSpreadsheet(file, dataset, done){
+    if (!webRLoaded) {
+      await Parser.installRPackages();
+    }
+
     var reader = new FileReader();
     reader.readAsArrayBuffer(file);
-    reader.onload = () => {
+    reader.onload = async () => {
       var fileReaderData = new Uint8Array(reader.result);
       var workbook = XLSX.read(fileReaderData, { type: 'array' });
       var sheet = workbook.Sheets[workbook.SheetNames[0]];
+
+      const basename  = file.name.substr(0, file.name.lastIndexOf('.'));
+      const csvObjectForFile = XLSX.utils.sheet_to_csv(sheet, {blankrows: true, RS: '\n', forceQuotes: true});
+
+      const textEncoder = new TextEncoder();
+      const encoded = textEncoder.encode(csvObjectForFile);
+      
+      await webR.FS.writeFile(`/home/web_user/`+ basename +`.csv`, encoded);
+      console.debug('parseSpreadsheet: File uploaded and written to /home/web_user/'+ basename + '.csv');
+
+      var loadRObjectResult = await webR.evalR(`robject <- read.csv('/home/web_user/`+basename+`.csv')`);
+      var dataFrameRender = await webR.evalR(`print(head(robject, n = 3L))`);
+
+      console.debug('parseSpreadsheet: Dataframe loaded. head(robject, n = 3L) contains -^');
+      console.debug(await dataFrameRender.toJs());
 
       var arr = XLSX.utils.sheet_to_json(sheet, { header: 1 });
 
@@ -158,9 +186,13 @@ export class Parser{
   }
 
   static async parseDelimitedText(file, dataset, done){
+    if (!webRLoaded) {
+      await Parser.installRPackages();
+    }
+
     return new Promise((resolve) => {
       Papa.parse(file, {
-        complete: function (results) {
+        complete: async function (results) {
           dataset.columns = [];
           dataset.errors = results.errors;
   
@@ -172,6 +204,19 @@ export class Parser{
             results.data.shift();
           }
           dataset.data = results.data;
+
+          const basename  = file.name.substr(0, file.name.lastIndexOf('.'));
+          const textEncoder = new TextEncoder();
+          const encoded = textEncoder.encode(results.data.join('\n'));
+
+          await webR.FS.writeFile(`/home/web_user/`+ basename +`.csv`, encoded);
+          console.debug('parseDelimitedText: File uploaded and written to /home/web_user/'+ basename + '.csv');
+
+          var loadRObjectResult = await webR.evalR(`robject <- read.csv('/home/web_user/`+basename+`.csv')`);
+          var dataFrameRender = await webR.evalR(`print(head(robject, n = 3L))`);
+
+          console.debug('parseDelimitedText: Dataframe loaded. head(robject, n = 3L) contains -^');
+          console.debug(await dataFrameRender.toJs());
   
           for (const [i, c] of columnIds.entries()) {
             var column = new DatasetColumn(c);
@@ -586,4 +631,4 @@ function guessDelimiter(csvContent){
   return ','
 }
 
-export { guessDataType, guessType, guessDelimiter, RepresentationTypes }
+export { guessDataType, guessType, guessDelimiter, RepresentationTypes, webRLoaded, rObjectExists }
